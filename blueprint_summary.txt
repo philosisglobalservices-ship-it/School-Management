@@ -1,0 +1,2420 @@
+ENTERPRISE SCHOOLADMINISTRATION MANAGEMENT SYSTEM
+Master Product Requirements & Developer-Ready Engineering Specification
+Version 1.0 | 10 October 2026Initial deployment assumption: one Nigerian school, designed for safe multi-school expansionAudience: Product Owner, School Leadership, UX, Engineering, QA, Security, DevOps
+Document Control
+Field
+Value
+Document status
+Engineering baseline for estimation and implementation planning; review decisions in Section 3 before production.
+Product
+Enterprise School Administration Management System (ESAMS)
+Primary roles
+Head Teacher, Teacher, Student, Parent/Guardian
+Foundational pillars
+Performance, Security, Usability, Reliability, Scalability
+Architecture
+Modular API-driven application; service boundaries may be extracted as scale requires.
+Primary data store
+PostgreSQL; private object storage for documents; optional Redis/queue.
+Security posture
+Default deny; least privilege; server-side RBAC + ABAC + resource/school scope.
+Important limitation
+No document can enumerate every unknown future edge case. Use layered controls, monitoring, incident response, and continuous test expansion.
+How to Use This Specification
+This is the implementation baseline. The development team should create version-controlled migrations, OpenAPI files, architecture decision records, automated tests, threat models, and runbooks from the requirements below. Where a policy choice is marked configurable, the Product Owner must approve the school-specific value before launch.
+Contents
+1. Product scope and principles
+2. Personas, roles, and authorization model
+3. Assumptions and decisions to confirm
+4. Functional requirements and non-functional requirements
+5. Logical ERD and data dictionary
+6. PostgreSQL reference schema
+7. RBAC/ABAC permission matrix
+8. Authentication and recovery sequence diagrams
+9. Screen-by-screen UI requirements
+10. API standards and endpoint specifications
+11. Result state machine and workflow rules
+12. Audit and security-event schemas
+13. Security alert rules and incident response
+14. Threat and edge-case matrices
+15. Developer-ready user stories and acceptance criteria
+16. Deployment architecture and CI/CD
+17. Monitoring, backup, disaster recovery
+18. Test strategy
+19. Requirement-to-code-and-test traceability
+20. Release gates and operational checklist
+1. Product Scope and Principles
+1.1 Vision
+Provide a centralized, secure platform for school administration, student records, academic assessment, attendance, communications, and reporting. Head Teachers receive broad school-level oversight; teachers are limited to assigned responsibilities; students can view their own authorized information but cannot edit official scores; parents can view records only for verified linked children.
+1.2 In Scope
+Identity, authentication, first-login password replacement, MFA for privileged accounts, account recovery, sessions, and access reviews.
+School configuration, academic sessions, terms, classes, subjects, staff, students, guardians, enrolments, and teacher assignments.
+Assessment setup, score entry, submission, review, approval, publication, controlled correction, and report cards.
+Student attendance, timetables, announcements, parent/student portals, notifications, reporting, audit and security monitoring.
+Optional fee-management module with separate permissions and reconciliation controls.
+Responsive web UI, documented APIs, migrations, automated tests, deployment and recovery operations.
+1.3 Out of Scope Unless Approved
+Payroll, full HR, learning management authoring, video conferencing, biometric attendance hardware, payment processing, transport, library, and inventory.
+Offline editing of official scores; mobile apps beyond responsive web; cross-school data sharing.
+Automated high-stakes grading decisions without human review.
+1.4 Non-negotiable principles
+Deny by default; grant least privilege; enforce authorization server-side on every request and background job.
+School/tenant, class, subject, student relationship, record state, and effective dates are part of authorization decisions.
+A student cannot create, update, approve, or publish official scores.
+Parents cannot access a child until the relationship is verified and active.
+Published results are versioned and never silently overwritten or physically deleted through normal workflows.
+Critical actions are attributable and audit records are protected from ordinary application-user modification.
+Fail closed for authorization and sensitive operations; preserve data integrity under retries, concurrency, and outages.
+2. Personas, Roles, and Authorization Model
+2.1 Core roles
+Role
+Default scope
+Typical permissions
+Explicit restrictions
+Head Teacher
+Assigned school(s); normally one school
+School administration, staff/student setup, assignments, academic oversight, result workflow, reports, security review
+No access to secrets/keys; sensitive actions remain audited; separation-of-duties may require a second approver.
+Teacher
+Assigned school + effective class/subject assignments
+Attendance, draft scores, submit results, assigned-class views, learning materials
+No unrelated classes; no role administration; no result publication unless separately granted.
+Student
+Own active/authorized student identity
+Published results, own attendance, timetable, announcements, approved materials
+No score edits, other-student records, administrative dashboards, or privileged APIs.
+Parent/Guardian
+Verified active links to children
+Linked-child results, attendance, timetable, notices, permitted communication
+No unrelated children, score edits, or self-approval of relationship verification.
+Platform Operator (future/internal)
+Explicit operational tenant scope
+Infrastructure health, support workflows, controlled tenant operations
+Not an implicit school administrator; no routine academic record access.
+Auditor (optional)
+Read-only approved audit scope
+Review selected logs and reports
+No mutation; sensitive fields masked by policy.
+2.2 RBAC + ABAC decision contract
+authorize(subject, action, resource, environment):
+  if subject is unauthenticated or session is revoked/expired: DENY
+  if account is disabled, locked, or must change password and action is not allowed in that state: DENY
+  if resource.school_id != subject.active_school_scope: DENY
+  if no active role grants action: DENY
+  if action requires attributes:
+      verify effective assignment, relationship, ownership, resource state,
+      academic session, time window, and any approval/separation-of-duty rules
+  if resource is published/finalized and action is a mutation:
+      require explicit correction workflow permission
+  emit security event for policy-defined denied/high-risk actions
+  ALLOW only when all applicable checks pass
+The policy engine must be centralized or consistently shared by all services. Never rely on frontend route guards, hidden controls, client-supplied role names, or untrusted tenant IDs.
+2.3 Attribute model
+Attribute
+Examples
+Purpose
+Subject
+user_id, status, roles, MFA status, must_change_password
+Authentication and role context
+Resource
+school_id, class_id, subject_id, student_id, status, version
+Record and workflow state
+Relationship
+teacher assignment, parent-child link, enrolment
+Record-level access
+Environment
+time, session risk, source IP, device/session state
+Risk-sensitive rules
+Action
+student.read, score.update, result.publish
+Granular permission
+Workflow
+draft/submitted/approved/published/correction_pending
+Allowed state transitions
+3. Assumptions and Decisions to Confirm
+ID
+Decision
+Baseline used in this specification
+Impact if changed
+DEC-01
+Single vs multi-school
+Schema includes school_id and tenant-aware constraints from day one
+Tenant isolation, billing, administration, reporting
+DEC-02
+Head Teacher oversight
+Broad school-level access, but critical actions remain audited and can require dual approval
+Approvals and segregation of duties
+DEC-03
+Result publication
+Teacher enters/submits; authorized reviewer approves; authorized publisher publishes
+Staff workflow and staffing model
+DEC-04
+Parent onboarding
+Invitation or registration followed by verified relationship approval
+Identity verification and support load
+DEC-05
+Authentication
+Server-managed secure sessions; MFA for privileged accounts
+Identity provider and UX choice
+DEC-06
+Fees
+Optional module; excluded from core release unless approved
+Finance schema and payment integration
+DEC-07
+Retention
+School/legal retention schedule to be approved before production
+Deletion, archive, and privacy obligations
+DEC-08
+Hosting/region
+Choose a provider/region after privacy, cost, recovery, and residency review
+Infrastructure and compliance
+DEC-09
+Service targets
+P95 API <=500 ms for routine endpoints; 99.9% monthly availability target; RPO 15 min/RTO 4 h initial targets
+Cost and architecture validation
+DEC-10
+Regulatory review
+Review applicable Nigerian education, child privacy, and data-protection obligations before launch
+Policies, consent, notices, and retention
+These assumptions make the blueprint implementable without pretending unresolved policy decisions have already been approved. The Product Owner must resolve them during inception.
+4. Functional and Non-functional Requirements
+4.1 Functional requirements
+ID
+Requirement
+FR-IAM-01
+All protected routes and APIs require a valid authenticated session.
+FR-IAM-02
+Accounts created with temporary credentials must be forced to set a permanent password before normal access.
+FR-IAM-03
+Account recovery must use single-use, expiring tokens; responses must not reveal whether an account exists.
+FR-IAM-04
+Privileged accounts require MFA; sensitive actions may require step-up authentication.
+FR-IAM-05
+Administrators can assign only roles they are authorized to grant; users cannot elevate themselves.
+FR-SCH-01
+Authorized administrators can configure academic sessions, terms, classes, subjects, timetables, and school profile.
+FR-STU-01
+Authorized staff can create and maintain student profiles and enrolments with validated unique identifiers.
+FR-REL-01
+Parent-child links must be verified, active, auditable, and revocable.
+FR-STAFF-01
+Teachers can access only classes and subjects covered by effective assignments.
+FR-RES-01
+Scores are validated against assessment maximums, enrolment, assignment, session, and workflow state.
+FR-RES-02
+Score entry, submission, approval, publication, and correction are distinct permissions.
+FR-RES-03
+Published results cannot be silently overwritten; corrections preserve old and new values and approvals.
+FR-ATT-01
+Attendance mutations are scoped to assigned classes and protected by correction rules after finalization.
+FR-PORTAL-01
+Students see only their own permitted records; parents see only active linked-child records.
+FR-NOT-01
+Notifications are queued, retried safely, and must not expose sensitive details to unverified recipients.
+FR-AUD-01
+Designated critical actions generate audit events with actor, action, resource, outcome, time, and correlation ID.
+FR-SEC-01
+Suspicious activity is rate-limited, logged, and escalated according to alert policy.
+FR-REP-01
+Reports and exports enforce the same authorization filters as source records.
+FR-OPS-01
+Backups, restoration, incident response, and access review procedures are documented and tested.
+4.2 Non-functional requirements (NFR)
+Pillar
+Requirement / target
+Verification
+Performance
+Routine APIs P95 <=500 ms under agreed load; common page P95 <=2 seconds; large reports async.
+Load tests and production telemetry.
+Security
+100% of protected API operations pass centralized authentication and authorization middleware/policy checks.
+Automated negative tests, static analysis, penetration test.
+Usability
+Responsive layouts; accessible keyboard navigation, labels, errors, focus order, and contrast.
+Usability and accessibility test.
+Reliability
+Transactional score updates; idempotent sensitive writes; backup restoration demonstrated.
+Fault injection, concurrency tests, restore drills.
+Scalability
+Scale app instances horizontally; indexes and query plans reviewed; queue workers independently scaled.
+Load/soak test and capacity review.
+Availability
+99.9% monthly target after agreed exclusions and monitoring definition.
+Uptime SLI/SLO dashboard.
+Recovery
+Initial RPO <=15 minutes and RTO <=4 hours, to be validated against selected database/backup services.
+Timed disaster-recovery exercise.
+Privacy
+Least collection, access logging, retention schedule, export controls, secure disposal.
+Privacy review and data inventory.
+Maintainability
+Versioned migrations, typed API contracts, automated CI gates, ADRs, structured logs.
+Pipeline and architecture review.
+5. Logical ERD and Data Dictionary
+5.1 ERD (Mermaid)
+erDiagram
+  SCHOOLS ||--o{ USERS : has
+  SCHOOLS ||--o{ STUDENTS : enrolls
+  SCHOOLS ||--o{ STAFF : employs
+  SCHOOLS ||--o{ ACADEMIC_SESSIONS : defines
+  ACADEMIC_SESSIONS ||--o{ TERMS : contains
+  SCHOOLS ||--o{ CLASSES : defines
+  SCHOOLS ||--o{ SUBJECTS : offers
+  USERS ||--o{ USER_ROLES : assigned
+  ROLES ||--o{ USER_ROLES : includes
+  ROLES ||--o{ ROLE_PERMISSIONS : grants
+  PERMISSIONS ||--o{ ROLE_PERMISSIONS : maps
+  USERS ||--o| STUDENTS : identity
+  USERS ||--o| STAFF : identity
+  USERS ||--o| GUARDIANS : identity
+  STUDENTS ||--o{ STUDENT_GUARDIANS : linked
+  GUARDIANS ||--o{ STUDENT_GUARDIANS : linked
+  STUDENTS ||--o{ ENROLLMENTS : has
+  CLASSES ||--o{ ENROLLMENTS : includes
+  STAFF ||--o{ TEACHER_ASSIGNMENTS : assigned
+  CLASSES ||--o{ TEACHER_ASSIGNMENTS : taught
+  SUBJECTS ||--o{ TEACHER_ASSIGNMENTS : covers
+  CLASSES ||--o{ ASSESSMENTS : assesses
+  SUBJECTS ||--o{ ASSESSMENTS : for
+  ASSESSMENTS ||--o{ SCORES : records
+  STUDENTS ||--o{ SCORES : receives
+  SCORES ||--o{ RESULT_CORRECTIONS : corrected_by
+  USERS ||--o{ AUDIT_EVENTS : performs
+  USERS ||--o{ USER_SESSIONS : owns
+  USERS ||--o{ NOTIFICATIONS : receives
+  SCHOOLS ||--o{ ATTENDANCE_RECORDS : records
+  STUDENTS ||--o{ ATTENDANCE_RECORDS : attends
+5.2 Entity conventions
+Primary keys: UUID. Timestamps: timestamptz stored in UTC. UI displays school-configured timezone.
+Every school-owned row has school_id; composite foreign keys or equivalent constraints must prevent cross-school references.
+Use created_at, updated_at, created_by, updated_by where meaningful; audit log remains the authoritative history for critical changes.
+Use status enums/check constraints with explicit state transitions; do not permit arbitrary state strings.
+Use optimistic concurrency via version integer or ETag for mutable records.
+PII is minimized; sensitive data is encrypted where warranted and never copied to logs.
+5.3 Data dictionary summary
+Table
+Key fields
+Constraints / notes
+schools
+id, name, timezone, status, config_json
+Unique school slug; active/suspended status.
+users
+id, school_id, email, phone, password_hash, status, must_change_password, mfa_enrolled_at
+Normalized email uniqueness within policy; password hash only; status and lockout fields.
+roles
+id, school_id nullable, code, name, is_system
+System roles protected; tenant custom roles scoped to school.
+permissions
+id, code, description, risk_level
+Permission code globally unique.
+user_roles
+user_id, role_id, school_id, valid_from, valid_until, granted_by
+No self-grant; time-bounded assignments supported.
+role_permissions
+role_id, permission_id, effect
+Only approved role grants; deny overrides allow where explicit deny rules are supported.
+students
+id, school_id, user_id nullable, student_number, names, date_of_birth, status
+Student number unique within school; date of birth treated as sensitive.
+guardians
+id, school_id, user_id, names, relationship/contact fields
+Sensitive contact details access controlled.
+student_guardians
+student_id, guardian_id, status, verified_at, verified_by, valid_from, valid_until
+Only active verified links grant parent access.
+staff
+id, school_id, user_id, employee_number, employment_status
+Employee number unique within school.
+academic_sessions
+id, school_id, name, start_date, end_date, status
+No overlapping active session unless explicitly permitted.
+terms
+id, session_id, name, start_date, end_date, sequence_no
+Dates within parent session.
+classes
+id, school_id, name, level, stream, status
+Unique school/name/session policy as decided.
+subjects
+id, school_id, code, name, status
+Code unique within school.
+enrollments
+id, school_id, student_id, class_id, session_id, status, start_date, end_date
+Unique student/session active enrolment; enforce no conflicting active class enrolments.
+teacher_assignments
+id, school_id, staff_id, class_id, subject_id, session_id, valid_from, valid_until
+Effective-dated assignment; uniqueness on active assignment tuple.
+assessments
+id, school_id, class_id, subject_id, term_id, title, max_score, status, opens_at, closes_at
+max_score > 0; close time after open time; state transition policy.
+scores
+id, school_id, assessment_id, student_id, score_value, status, version, entered_by, submitted_at
+Unique assessment/student; 0 <= score <= max_score; distinguish absent/missing/exempt.
+result_corrections
+id, score_id, old_value, proposed_value, reason, requested_by, approved_by, status
+Requester cannot be sole approver where dual control applies.
+attendance_records
+id, school_id, student_id, class_id, session_id, date, status, recorded_by, version
+Unique student/class/date/session; controlled correction after lock.
+timetables
+id, school_id, class_id, subject_id, teacher_assignment_id, weekday, starts_at, ends_at, effective dates
+No overlapping class/teacher slots; timezone policy documented.
+announcements
+id, school_id, title, body, audience_rule, published_at, expires_at, created_by
+Audience filters must be authorized server-side.
+notifications
+id, school_id, recipient_user_id, channel, template_code, status, provider_ref, attempts
+Do not store unnecessary sensitive body text; idempotency key.
+user_sessions
+id, user_id, token_hash, created_at, last_seen_at, expires_at, revoked_at, risk_metadata
+Store token hash only; revoke on security events.
+password_reset_tokens
+id, user_id, token_hash, expires_at, used_at, created_at
+Single use; token hash only; expire quickly.
+audit_events
+id, school_id, actor_user_id, action, resource_type, resource_id, outcome, occurred_at, correlation_id, details_redacted
+Append-only permissions; integrity protection.
+security_events
+id, school_id, actor_user_id nullable, event_type, severity, source_ip, details_redacted, occurred_at, correlation_id
+Access restricted; retention policy; alert deduplication.
+documents
+id, school_id, owner_type, owner_id, storage_key, content_type, size_bytes, checksum, classification
+Private storage, malware scan, signed short-lived downloads.
+fee_accounts/payments
+optional schema
+Separate finance permissions, immutable payment ledger, reconciliation, no destructive edits.
+6. PostgreSQL Reference Schema
+The following reference DDL covers the core entities and key constraints. It is a baseline migration, not a substitute for environment-specific migration review, row-level security decisions, or full data-retention policies. Use a migration tool and apply changes through reviewed version-controlled migrations.
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+ 
+CREATE TABLE schools (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  slug text NOT NULL UNIQUE,
+  name text NOT NULL,
+  timezone text NOT NULL DEFAULT 'Africa/Lagos',
+  status text NOT NULL CHECK (status IN ('active','suspended','archived')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+ 
+CREATE TABLE users (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  email text,
+  phone_e164 text,
+  password_hash text NOT NULL,
+  status text NOT NULL CHECK (status IN ('invited','active','locked','suspended','disabled')),
+  must_change_password boolean NOT NULL DEFAULT true,
+  failed_login_count integer NOT NULL DEFAULT 0 CHECK (failed_login_count >= 0),
+  locked_until timestamptz,
+  mfa_enrolled_at timestamptz,
+  last_login_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (email IS NOT NULL OR phone_e164 IS NOT NULL)
+);
+CREATE UNIQUE INDEX users_school_email_uq
+  ON users (school_id, lower(email)) WHERE email IS NOT NULL;
+CREATE UNIQUE INDEX users_school_phone_uq
+  ON users (school_id, phone_e164) WHERE phone_e164 IS NOT NULL;
+ 
+CREATE TABLE roles (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid REFERENCES schools(id),
+  code text NOT NULL,
+  name text NOT NULL,
+  is_system boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (school_id, code)
+);
+CREATE TABLE permissions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  code text NOT NULL UNIQUE,
+  description text NOT NULL,
+  risk_level text NOT NULL CHECK (risk_level IN ('low','medium','high','critical'))
+);
+CREATE TABLE role_permissions (
+  role_id uuid NOT NULL REFERENCES roles(id),
+  permission_id uuid NOT NULL REFERENCES permissions(id),
+  effect text NOT NULL DEFAULT 'allow' CHECK (effect IN ('allow','deny')),
+  PRIMARY KEY (role_id, permission_id)
+);
+CREATE TABLE user_roles (
+  user_id uuid NOT NULL REFERENCES users(id),
+  role_id uuid NOT NULL REFERENCES roles(id),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  valid_from timestamptz NOT NULL DEFAULT now(),
+  valid_until timestamptz,
+  granted_by uuid NOT NULL REFERENCES users(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, role_id, school_id),
+  CHECK (valid_until IS NULL OR valid_until > valid_from)
+);
+ 
+CREATE TABLE students (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  user_id uuid UNIQUE REFERENCES users(id),
+  student_number text NOT NULL,
+  first_name text NOT NULL,
+  middle_name text,
+  last_name text NOT NULL,
+  date_of_birth date,
+  status text NOT NULL CHECK (status IN ('applicant','active','transferred','graduated','withdrawn','suspended')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (school_id, student_number),
+  UNIQUE (school_id, id)
+);
+ 
+CREATE TABLE guardians (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  user_id uuid NOT NULL UNIQUE REFERENCES users(id),
+  first_name text NOT NULL,
+  last_name text NOT NULL,
+  relationship_label text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (school_id, id)
+);
+CREATE TABLE student_guardians (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  student_id uuid NOT NULL,
+  guardian_id uuid NOT NULL,
+  status text NOT NULL CHECK (status IN ('pending','verified','revoked','rejected')),
+  verified_at timestamptz,
+  verified_by uuid REFERENCES users(id),
+  valid_from date NOT NULL DEFAULT CURRENT_DATE,
+  valid_until date,
+  FOREIGN KEY (school_id, student_id) REFERENCES students(school_id, id),
+  FOREIGN KEY (school_id, guardian_id) REFERENCES guardians(school_id, id),
+  UNIQUE (school_id, student_id, guardian_id),
+  CHECK (valid_until IS NULL OR valid_until >= valid_from)
+);
+ 
+CREATE TABLE staff (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  user_id uuid NOT NULL UNIQUE REFERENCES users(id),
+  employee_number text NOT NULL,
+  first_name text NOT NULL,
+  last_name text NOT NULL,
+  employment_status text NOT NULL CHECK (employment_status IN ('active','leave','suspended','terminated')),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (school_id, employee_number),
+  UNIQUE (school_id, id)
+);
+ 
+CREATE TABLE academic_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  name text NOT NULL,
+  start_date date NOT NULL,
+  end_date date NOT NULL,
+  status text NOT NULL CHECK (status IN ('planned','active','closed','archived')),
+  UNIQUE (school_id, name),
+  UNIQUE (school_id, id),
+  CHECK (end_date >= start_date)
+);
+CREATE TABLE terms (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  session_id uuid NOT NULL,
+  name text NOT NULL,
+  sequence_no smallint NOT NULL CHECK (sequence_no > 0),
+  start_date date NOT NULL,
+  end_date date NOT NULL,
+  FOREIGN KEY (school_id, session_id) REFERENCES academic_sessions(school_id, id),
+  UNIQUE (session_id, sequence_no),
+  CHECK (end_date >= start_date)
+);
+CREATE TABLE classes (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  name text NOT NULL,
+  level text,
+  stream text,
+  status text NOT NULL CHECK (status IN ('active','inactive','archived')),
+  UNIQUE (school_id, id),
+  UNIQUE (school_id, name, stream)
+);
+CREATE TABLE subjects (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  code text NOT NULL,
+  name text NOT NULL,
+  status text NOT NULL CHECK (status IN ('active','inactive')),
+  UNIQUE (school_id, code),
+  UNIQUE (school_id, id)
+);
+CREATE TABLE enrollments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  student_id uuid NOT NULL,
+  class_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  start_date date NOT NULL,
+  end_date date,
+  status text NOT NULL CHECK (status IN ('active','completed','transferred','cancelled')),
+  FOREIGN KEY (school_id, student_id) REFERENCES students(school_id, id),
+  FOREIGN KEY (school_id, class_id) REFERENCES classes(school_id, id),
+  FOREIGN KEY (school_id, session_id) REFERENCES academic_sessions(school_id, id),
+  UNIQUE (school_id, id),
+  CHECK (end_date IS NULL OR end_date >= start_date)
+);
+CREATE UNIQUE INDEX enrollments_one_active_student_session
+  ON enrollments(school_id, student_id, session_id) WHERE status = 'active';
+ 
+CREATE TABLE teacher_assignments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  staff_id uuid NOT NULL,
+  class_id uuid NOT NULL,
+  subject_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  valid_from date NOT NULL,
+  valid_until date,
+  status text NOT NULL CHECK (status IN ('active','ended','revoked')),
+  FOREIGN KEY (school_id, staff_id) REFERENCES staff(school_id, id),
+  FOREIGN KEY (school_id, class_id) REFERENCES classes(school_id, id),
+  FOREIGN KEY (school_id, subject_id) REFERENCES subjects(school_id, id),
+  FOREIGN KEY (school_id, session_id) REFERENCES academic_sessions(school_id, id),
+  CHECK (valid_until IS NULL OR valid_until >= valid_from)
+);
+CREATE INDEX teacher_assignments_scope_idx
+  ON teacher_assignments(school_id, staff_id, class_id, subject_id, session_id, status);
+ 
+CREATE TABLE assessments (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  class_id uuid NOT NULL,
+  subject_id uuid NOT NULL,
+  term_id uuid NOT NULL,
+  title text NOT NULL,
+  assessment_type text NOT NULL,
+  max_score numeric(7,2) NOT NULL CHECK (max_score > 0),
+  opens_at timestamptz,
+  closes_at timestamptz,
+  status text NOT NULL CHECK (status IN ('draft','open','closed','under_review','approved','published','cancelled')),
+  version integer NOT NULL DEFAULT 1,
+  created_by uuid NOT NULL REFERENCES users(id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (school_id, class_id) REFERENCES classes(school_id, id),
+  FOREIGN KEY (school_id, subject_id) REFERENCES subjects(school_id, id),
+  FOREIGN KEY (school_id, term_id) REFERENCES terms(school_id, id),
+  CHECK (closes_at IS NULL OR opens_at IS NULL OR closes_at > opens_at)
+);
+ 
+CREATE TABLE scores (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  assessment_id uuid NOT NULL,
+  student_id uuid NOT NULL,
+  score_value numeric(7,2),
+  score_status text NOT NULL CHECK (score_status IN ('scored','absent','missing','exempt')),
+  workflow_status text NOT NULL CHECK (workflow_status IN ('draft','submitted','under_review','approved','published','correction_pending')),
+  version integer NOT NULL DEFAULT 1,
+  entered_by uuid NOT NULL REFERENCES users(id),
+  submitted_at timestamptz,
+  approved_by uuid REFERENCES users(id),
+  approved_at timestamptz,
+  published_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (school_id, assessment_id) REFERENCES assessments(school_id, id),
+  FOREIGN KEY (school_id, student_id) REFERENCES students(school_id, id),
+  UNIQUE (assessment_id, student_id),
+  CHECK ((score_status = 'scored' AND score_value IS NOT NULL) OR
+         (score_status <> 'scored' AND score_value IS NULL)),
+  CHECK (score_value IS NULL OR score_value >= 0)
+);
+CREATE INDEX scores_student_assessment_idx ON scores(school_id, student_id, assessment_id);
+CREATE INDEX scores_workflow_idx ON scores(school_id, workflow_status, updated_at);
+ 
+CREATE TABLE result_corrections (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  score_id uuid NOT NULL REFERENCES scores(id),
+  old_score_value numeric(7,2),
+  proposed_score_value numeric(7,2),
+  old_score_status text NOT NULL,
+  proposed_score_status text NOT NULL,
+  reason text NOT NULL CHECK (length(trim(reason)) >= 10),
+  requested_by uuid NOT NULL REFERENCES users(id),
+  approved_by uuid REFERENCES users(id),
+  status text NOT NULL CHECK (status IN ('pending','approved','rejected','withdrawn')),
+  requested_at timestamptz NOT NULL DEFAULT now(),
+  decided_at timestamptz,
+  decision_note text,
+  CHECK (approved_by IS NULL OR approved_by <> requested_by)
+);
+ 
+CREATE TABLE attendance_records (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid NOT NULL REFERENCES schools(id),
+  student_id uuid NOT NULL,
+  class_id uuid NOT NULL,
+  session_id uuid NOT NULL,
+  attendance_date date NOT NULL,
+  status text NOT NULL CHECK (status IN ('present','late','absent','excused')),
+  reason text,
+  recorded_by uuid NOT NULL REFERENCES users(id),
+  version integer NOT NULL DEFAULT 1,
+  finalized_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  FOREIGN KEY (school_id, student_id) REFERENCES students(school_id, id),
+  FOREIGN KEY (school_id, class_id) REFERENCES classes(school_id, id),
+  FOREIGN KEY (school_id, session_id) REFERENCES academic_sessions(school_id, id),
+  UNIQUE (school_id, student_id, class_id, session_id, attendance_date)
+);
+ 
+CREATE TABLE user_sessions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id),
+  token_hash text NOT NULL UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  last_seen_at timestamptz NOT NULL DEFAULT now(),
+  expires_at timestamptz NOT NULL,
+  revoked_at timestamptz,
+  revoke_reason text,
+  source_ip inet,
+  user_agent text
+);
+CREATE INDEX user_sessions_active_idx ON user_sessions(user_id, expires_at) WHERE revoked_at IS NULL;
+ 
+CREATE TABLE password_reset_tokens (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL REFERENCES users(id),
+  token_hash text NOT NULL UNIQUE,
+  expires_at timestamptz NOT NULL,
+  used_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+ 
+CREATE TABLE audit_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid REFERENCES schools(id),
+  actor_user_id uuid REFERENCES users(id),
+  actor_role_snapshot jsonb NOT NULL DEFAULT '[]'::jsonb,
+  action text NOT NULL,
+  resource_type text NOT NULL,
+  resource_id text,
+  outcome text NOT NULL CHECK (outcome IN ('success','denied','failure')),
+  reason_code text,
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  correlation_id uuid NOT NULL,
+  source_ip inet,
+  user_agent text,
+  details_redacted jsonb NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX audit_events_school_time_idx ON audit_events(school_id, occurred_at DESC);
+CREATE INDEX audit_events_resource_idx ON audit_events(resource_type, resource_id, occurred_at DESC);
+ 
+CREATE TABLE security_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  school_id uuid REFERENCES schools(id),
+  actor_user_id uuid REFERENCES users(id),
+  event_type text NOT NULL,
+  severity text NOT NULL CHECK (severity IN ('info','low','medium','high','critical')),
+  source_ip inet,
+  correlation_id uuid NOT NULL,
+  occurred_at timestamptz NOT NULL DEFAULT now(),
+  details_redacted jsonb NOT NULL DEFAULT '{}'::jsonb,
+  alert_status text NOT NULL DEFAULT 'new' CHECK (alert_status IN ('new','triaged','contained','closed','false_positive'))
+);
+CREATE INDEX security_events_type_time_idx ON security_events(event_type, occurred_at DESC);
+Implementation notes: enforce score_value <= assessments.max_score in transactional service logic or a database trigger because a CHECK constraint cannot safely reference another table. Add migration tests for cross-school references, authorization indexes, retention/partitioning strategy, and the final unique-active-enrolment rule. If multiple simultaneous class enrolments are legitimate, revise the uniqueness rule to match the school's policy.
+7. Full RBAC/ABAC Permission Matrix
+7.1 Legend
+F = school-wide permitted scope; A = assigned class/subject scope; O = own record; L = verified linked child; R = request only; AP = approve only when designated; P = publish only when designated; — = denied by default. Every permission is also constrained by school_id, account status, resource state, effective dates, and workflow policy.
+Permission code
+Head Teacher
+Teacher
+Student
+Parent
+dashboard.school.read
+F
+—
+—
+—
+profile.self.read
+F
+O
+O
+O
+profile.self.update
+F
+O (limited)
+O (limited)
+O (limited)
+user.create
+F
+—
+—
+—
+user.suspend
+F
+—
+—
+—
+role.assign
+F*
+—
+—
+—
+permission.manage
+F*
+—
+—
+—
+student.create
+F
+—
+—
+—
+student.read
+F
+A
+O
+L
+student.update
+F
+A (limited)
+R
+R
+guardian_link.request
+F
+—
+—
+R
+guardian_link.verify
+F/AP
+—
+—
+—
+class.manage
+F
+—
+—
+—
+subject.manage
+F
+—
+—
+—
+teacher_assignment.manage
+F
+—
+—
+—
+attendance.read
+F
+A
+O
+L
+attendance.create
+F
+A
+—
+—
+attendance.update.draft
+F
+A
+—
+—
+attendance.correct.finalized
+AP via workflow
+R
+R
+R
+assessment.create
+F
+A*
+—
+—
+score.read.draft
+F
+A
+—
+—
+score.create
+F
+A
+—
+—
+score.update.draft
+F
+A
+—
+—
+result.submit
+F
+A
+—
+—
+result.review
+F/AP
+—
+—
+—
+result.approve
+AP
+—
+—
+—
+result.publish
+P
+—
+—
+—
+result.published.read
+F
+A
+O
+L
+result.correction.request
+F
+R
+R
+R
+result.correction.approve
+AP
+—
+—
+—
+result.export
+F*
+A*
+O*
+L*
+timetable.manage
+F
+—
+—
+—
+timetable.read
+F
+A
+O
+L
+announcement.manage
+F
+—
+—
+—
+announcement.read
+F
+F
+F
+F
+report.school.read
+F
+—
+—
+—
+report.class.read
+F
+A
+—
+—
+audit.read
+F*
+—
+—
+—
+security_event.read
+F*
+—
+—
+—
+document.upload
+F
+A*
+—
+R*
+document.download
+F
+A*
+O*
+L*
+fee.read
+F*
+—
+O*
+L*
+fee.adjust
+F*
+—
+—
+—
+payment.record
+F*
+—
+—
+—
+*Sensitive permissions require explicit grant, MFA/step-up verification where configured, and audit logging. Head Teacher authority is school-level, not infrastructure-level. A user cannot grant permissions beyond their own grantable-permission set. For high-risk operations, enforce maker-checker separation when configured.
+7.2 ABAC policy examples
+# Student result read
+ALLOW if action == result.published.read
+  AND subject.status == active
+  AND resource.school_id == subject.active_school_id
+  AND resource.workflow_status == published
+  AND (
+       subject.student_id == resource.student_id
+       OR active_verified_guardian_link(subject.guardian_id, resource.student_id, now)
+       OR has_permission(subject, result.published.read, resource)
+          AND effective_teacher_assignment(subject, resource.class_id, resource.subject_id, resource.session_id, now)
+       OR has_permission(subject, result.school.read)
+  )
+ 
+# Teacher score update
+ALLOW if action == score.update.draft
+  AND subject has active teacher role
+  AND effective_teacher_assignment(subject, assessment.class_id, assessment.subject_id, assessment.session_id, now)
+  AND assessment.status == open
+  AND score.workflow_status == draft
+  AND subject.school_id == resource.school_id
+  AND session is not closed
+ 
+# Published score correction
+ALLOW only through correction command when:
+  action == result.correction.request OR result.correction.approve
+  requester != approver
+  reason meets policy
+  old value and proposed value are versioned
+  correction decision and applied change are transactionally audited
+8. Authentication and Account-Recovery Sequence Diagrams
+8.1 First login / mandatory password change
+sequenceDiagram
+  actor User
+  participant UI as Web UI
+  participant API as Auth API
+  participant IAM as Identity/Policy Service
+  participant DB as PostgreSQL
+  User->>UI: Submit credentials
+  UI->>API: POST /auth/login
+  API->>IAM: Verify credential + account status + rate limits
+  IAM->>DB: Read user and password hash
+  DB-->>IAM: User record
+  IAM-->>API: Valid, must_change_password=true
+  API->>DB: Create restricted session
+  API-->>UI: Session + PASSWORD_CHANGE_REQUIRED
+  UI->>API: POST /auth/change-password
+  API->>IAM: Validate current session, password policy, CSRF, rate limit
+  IAM->>DB: Store new Argon2id hash; clear flag; revoke temporary sessions/tokens
+  IAM->>DB: Append audit event
+  API-->>UI: 204 / next dashboard
+  UI->>API: GET /me
+  API-->>UI: Role-filtered profile and permissions
+8.2 Password recovery
+sequenceDiagram
+  actor User
+  participant UI as Web UI
+  participant API as Auth API
+  participant IAM as Identity Service
+  participant DB as PostgreSQL
+  participant Mail as Email/SMS Provider
+  User->>UI: Enter account identifier
+  UI->>API: POST /auth/forgot-password
+  API->>IAM: Rate-limit + normalize identifier
+  IAM->>DB: Find eligible account internally
+  IAM->>DB: Store hash of random single-use token with short expiry
+  IAM->>Mail: Send generic recovery link if account eligible
+  API-->>UI: 202 generic response (same wording for known/unknown account)
+  User->>UI: Open recovery link and set new password
+  UI->>API: POST /auth/reset-password {token,newPassword}
+  API->>IAM: Hash token; check expiry, use status, policy, abuse controls
+  IAM->>DB: Transaction: change hash, mark token used, revoke sessions, clear flag if policy permits
+  IAM->>DB: Append audit/security events
+  API-->>UI: 204 success; ask user to sign in
+8.3 Login requirements
+Generic login failure message; do not reveal whether username exists.
+Rate-limit by account identifier and source/network signals; avoid permanent lockout that attackers can weaponize.
+Use adaptive delay and risk-based step-up; alert on suspicious privileged-account attempts.
+Cookie-based sessions: Secure, HttpOnly, SameSite appropriate to app; CSRF protection for state-changing requests.
+Store only a hash of opaque session/reset tokens; never log tokens or passwords.
+Force password replacement before allowing normal API routes; only login, logout, MFA, password-change, and recovery endpoints may be reachable in restricted state.
+Re-check user status and relevant authorization on every request; invalidate cache entries when roles or assignments change.
+9. Screen-by-Screen UI Requirements
+ID
+Screen
+Audience
+UI requirements
+Acceptance/security notes
+UI-001
+Login
+All
+Identifier, password, show/hide, submit, forgot password, accessible errors
+Rate-limited; generic failure; no protected data rendered.
+UI-002
+First-login password change
+First-login users
+Current/temp credential if needed, new password, confirm, password guidance
+No skip/close bypass; backend blocks all normal routes.
+UI-003
+MFA enrollment/challenge
+Privileged users / risk-based
+Authenticator/passkey setup, recovery codes, verification
+Recovery codes shown once; sensitive values never logged.
+UI-004
+Password recovery
+All
+Account identifier; generic confirmation
+No account enumeration; anti-abuse controls.
+UI-005
+Reset password
+Recovery-token holder
+New password, confirm, expiry/error states
+Token single-use; sessions revoked after reset.
+UI-006
+Head Teacher dashboard
+Head Teacher
+School metrics, workflow queues, alerts, recent audited activity
+Each widget applies school scope and permission checks.
+UI-007
+Teacher dashboard
+Teacher
+Assigned classes/subjects, attendance tasks, assessments, result states
+No unassigned class records in UI or API payload.
+UI-008
+Student dashboard
+Student
+Published results, attendance, timetable, notices
+Own student ID derived from server session, not trusted from client.
+UI-009
+Parent dashboard / child switcher
+Parent
+Linked children, results, attendance, notices
+Only verified active links; visible child identity to avoid wrong-child actions.
+UI-010
+User and role administration
+Head Teacher authorized
+Search, create/invite, suspend, role grant, assignment scope
+No self-escalation; high-risk changes require MFA and audit.
+UI-011
+Student list/profile
+Authorized staff
+Search, filters, profile, enrolment, guardian link status
+Search filters server-side; sensitive fields masked as policy requires.
+UI-012
+Staff and assignments
+Head Teacher
+Staff profiles, class/subject/session assignments
+Effective dates and conflicts validated; changes audited.
+UI-013
+Academic session/term setup
+Head Teacher
+Create/edit sessions, terms, status, date ranges
+Block overlapping/invalid ranges per school policy.
+UI-014
+Class and subject setup
+Head Teacher
+Create/edit/archive classes and subjects
+Prevent deletion where dependent historical records exist.
+UI-015
+Assessment setup
+Authorized Head Teacher/assigned teacher
+Title, class, subject, term, maximum, dates, status
+Class/subject/session authorization; max > 0.
+UI-016
+Score-entry grid
+Assigned teacher
+Roster, score values, absent/missing/exempt, save draft, validation summary
+Bulk validation, optimistic concurrency, no publication controls by default.
+UI-017
+Result submission/review
+Teacher/reviewer
+Submit, review errors, approve/return with reason
+Workflow state machine enforced by backend.
+UI-018
+Result publication
+Authorized publisher
+Preview roster, completeness checks, confirmation, publish
+Step-up auth; idempotent publish; audit; notify after commit.
+UI-019
+Correction request
+Authorized requester/reviewer
+Old/new values, reason, evidence reference, decision
+Requester != approver; immutable history; notification.
+UI-020
+Attendance register
+Assigned teacher
+Date, roster, present/late/absent/excused, save/finalize
+No duplicate entries; date/class/session validation.
+UI-021
+Timetable
+Head Teacher/assigned viewers
+Weekly grid, assignments, conflict markers
+No overlap for teacher/class unless explicitly allowed.
+UI-022
+Announcements
+Head Teacher author; all readers
+Compose, target audience, schedule, expiry
+Audience resolved server-side; preview recipient scope.
+UI-023
+Notifications center
+All authenticated users
+Read/unread, preferences, delivery state
+No sensitive body in push preview unless policy allows.
+UI-024
+Reports and exports
+Authorized roles
+Filters, preview, export request/status
+Scope checked before query and at file download; audit exports.
+UI-025
+Audit viewer
+Explicitly authorized Head Teacher/auditor
+Search by actor/action/resource/time/outcome
+Read-only; redact sensitive values; export separately permissioned.
+UI-026
+Security alerts
+Explicitly authorized Head Teacher/security role
+Severity, event count, status, investigation notes
+Only minimum details needed; actions audited.
+UI-027
+Profile and sessions
+All users
+Profile fields, active sessions, revoke sessions, password/MFA settings
+Only own sessions unless explicit support permission.
+UI-028
+Import wizard
+Authorized staff
+Upload, mapping, validation preview, row errors, confirm
+File scan, size/type limits, idempotency, no partial silent import.
+UI-029
+Error/maintenance states
+All
+Clear message, correlation reference, retry guidance
+No stack traces, secrets, or record existence leakage.
+10. API Standards and Endpoint Specifications
+10.1 API conventions
+Base path: /api/v1. JSON request/response; UTF-8; UTC ISO-8601 timestamps.
+Authentication: secure server-managed session cookie; mutating requests require CSRF protection. If bearer tokens are selected instead, document rotation, audience, issuer, storage, and revocation strategy.
+All responses include a request/correlation ID header; never include stack traces or secrets.
+Use cursor pagination for large datasets; enforce maximum page size (default 50, hard maximum 200).
+Use Idempotency-Key on operations where retries could duplicate side effects (bulk import, result publish, payment if later enabled).
+Use If-Match/ETag or version fields for concurrent edits; return 409 on stale version.
+Errors use stable machine-readable codes, safe messages, and optional field errors.
+All endpoint examples are representative; implement the complete contract in OpenAPI 3.1 and validate it in CI.
+10.2 Standard error envelope
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "You are not permitted to perform this action.",
+    "requestId": "b77a4dd4-9a8c-4dc1-a6a2-8c9a25d9c204",
+    "fieldErrors": []
+  }
+}
+10.3 Endpoint catalog
+Method
+Endpoint
+Authorization
+Purpose
+POST
+/auth/login
+Public, rate limited
+Authenticate; response may require MFA/password change
+POST
+/auth/logout
+Authenticated
+Revoke current session
+GET
+/auth/sessions
+Own account
+List session metadata
+DELETE
+/auth/sessions/{sessionId}
+Own session; privileged support policy for others
+Revoke session
+POST
+/auth/change-password
+Authenticated; required in restricted state
+Change password
+POST
+/auth/forgot-password
+Public, rate limited
+Request recovery; generic response
+POST
+/auth/reset-password
+Valid recovery token
+Set new password and revoke sessions
+POST
+/auth/mfa/enroll
+Privileged user
+Begin MFA enrollment
+POST
+/auth/mfa/verify
+Enrollment/challenge state
+Verify MFA proof
+GET
+/me
+Authenticated
+Return caller profile, active school, safe role/permission summary
+GET
+/schools/{schoolId}/students
+Student-read permission + scope
+Search authorized students
+POST
+/schools/{schoolId}/students
+Student-create permission
+Create student
+GET
+/students/{studentId}
+Resource-scoped authorization
+Read student
+PATCH
+/students/{studentId}
+Student-update permission + version
+Update permitted fields
+POST
+/students/{studentId}/enrollments
+Enrollment-management permission
+Enroll/promote/transfer
+POST
+/guardians/{guardianId}/student-links
+Request/verify policy
+Create pending guardian link
+PATCH
+/student-links/{linkId}/decision
+Link-verify permission
+Approve/reject link
+GET
+/classes
+Class-read permission
+List only authorized classes
+POST
+/classes
+Class-manage permission
+Create class
+POST
+/teacher-assignments
+Assignment-manage permission
+Create effective-dated assignment
+POST
+/assessments
+Assessment-create permission
+Create assessment
+GET
+/assessments/{assessmentId}/scores
+Score-read permission + scope
+Read score roster by workflow visibility
+PUT
+/assessments/{assessmentId}/scores/bulk
+Score-create/update permission + idempotency
+Validate and upsert draft scores atomically or return per-row result
+POST
+/assessments/{assessmentId}/submit
+Result-submit permission
+Submit assessment results
+POST
+/assessments/{assessmentId}/review
+Result-review permission
+Approve or return with reason
+POST
+/assessments/{assessmentId}/publish
+Result-publish permission + step-up
+Publish approved result set
+POST
+/scores/{scoreId}/corrections
+Correction-request permission
+Request correction
+POST
+/corrections/{correctionId}/decision
+Correction-approve permission
+Approve/reject; requester cannot approve
+GET
+/students/{studentId}/results
+Self/linked/assigned/school scope + published visibility
+Read permitted results
+GET
+/attendance
+Attendance-read permission + scope
+Filtered attendance list
+POST
+/attendance/bulk
+Attendance-write permission + idempotency
+Record attendance
+POST
+/attendance/{recordId}/corrections
+Correction workflow
+Request or apply authorized correction
+GET
+/timetables
+Timetable-read permission + scope
+List permitted timetable
+POST
+/announcements
+Announcement-manage permission
+Create/schedule announcement
+GET
+/notifications
+Authenticated recipient
+List own notifications
+POST
+/reports/exports
+Export permission + scoped filters
+Create asynchronous export job
+GET
+/reports/exports/{jobId}
+Owner or authorized report reader
+Check export status
+GET
+/reports/exports/{jobId}/download
+Re-authorize at download time
+Download short-lived signed file
+GET
+/audit-events
+Audit-read permission
+Search authorized audit records
+GET
+/security-events
+Security-event-read permission
+Search security events
+POST
+/imports/students/validate
+Import permission
+Validate upload without committing
+POST
+/imports/students/commit
+Import permission + idempotency
+Commit validated import
+10.4 Request and response schemas
+Login
+POST /api/v1/auth/login
+Request:
+{
+  "identifier": "teacher@example.school",
+  "password": "user-supplied-secret",
+  "mfaChallengeId": "optional-opaque-id",
+  "mfaCode": "optional-code"
+}
+Success 200:
+{
+  "status": "authenticated",
+  "nextAction": "CHANGE_PASSWORD | COMPLETE_MFA | OPEN_DASHBOARD",
+  "user": { "id": "uuid", "displayName": "Example User", "activeSchoolId": "uuid" }
+}
+Failure: 401 INVALID_CREDENTIALS (generic); 429 RATE_LIMITED.
+Do not return password hash, internal risk score, or full permission graph.
+Student create
+POST /api/v1/schools/{schoolId}/students
+Request:
+{
+  "studentNumber": "STU-2026-0042",
+  "firstName": "Amina",
+  "middleName": null,
+  "lastName": "Example",
+  "dateOfBirth": "2014-03-15",
+  "status": "active"
+}
+201 Response:
+{
+  "id": "uuid",
+  "schoolId": "uuid",
+  "studentNumber": "STU-2026-0042",
+  "firstName": "Amina",
+  "lastName": "Example",
+  "status": "active",
+  "version": 1,
+  "createdAt": "2026-10-10T12:00:00Z"
+}
+Validation: unique student number per school; actor has student.create; school path must match authorized scope.
+Bulk score upsert
+PUT /api/v1/assessments/{assessmentId}/scores/bulk
+Headers: Idempotency-Key: <random-client-key>; If-Match: <assessment-version>
+Request:
+{
+  "scores": [
+    {"studentId":"uuid","scoreStatus":"scored","scoreValue":18.5,"version":2},
+    {"studentId":"uuid","scoreStatus":"absent","scoreValue":null,"version":1}
+  ]
+}
+200 Response:
+{
+  "assessmentId":"uuid",
+  "results":[
+    {"studentId":"uuid","status":"saved","scoreId":"uuid","version":3},
+    {"studentId":"uuid","status":"saved","scoreId":"uuid","version":2}
+  ],
+  "rejectedRows":[]
+}
+Rules: actor must have an effective assignment; every student must be enrolled in the assessment class/session; scoreValue <= max_score; assessment open; all authorization checked per row. Use one transaction for all-or-nothing bulk saves by default; if partial acceptance is selected, define explicit per-row semantics and never silently discard errors.
+Publish results
+POST /api/v1/assessments/{assessmentId}/publish
+Headers: Idempotency-Key: <unique-key>; If-Match: <assessment-version>
+Request:
+{
+  "confirmPublication": true,
+  "publicationNote": "Term assessment approved for release"
+}
+200 Response:
+{
+  "assessmentId":"uuid",
+  "status":"published",
+  "publishedAt":"2026-10-10T12:00:00Z",
+  "publishedBy":"uuid",
+  "publishedVersion": 4
+}
+Rules: result-publish permission; MFA/step-up if configured; all required approvals complete;
+assessment and scores transition atomically; audit event commits with transaction/outbox;
+notifications are emitted only after commit.
+Password recovery
+POST /api/v1/auth/forgot-password
+Request: {"identifier":"parent@example.com"}
+Response: 202 {"message":"If the account can be recovered, instructions will be sent."}
+POST /api/v1/auth/reset-password
+Request: {"token":"opaque-single-use-token","newPassword":"user-supplied-secret"}
+Response: 204 No Content
+Rules: store token hash only; short expiry; single use; rate limits; generic responses; revoke sessions;
+audit recovery initiation/completion without logging token or password.
+Standard response status codes
+Code
+Use
+200
+Successful read/update/action returning representation.
+201
+Resource created.
+202
+Accepted for asynchronous processing or generic recovery request.
+204
+Successful action with no response body.
+400
+Malformed request.
+401
+Authentication required or invalid credentials.
+403
+Authenticated but not authorized; safe generic response.
+404
+Resource not found or intentionally concealed by policy.
+409
+State conflict, duplicate, stale version, or invalid transition.
+413
+Payload too large.
+422
+Semantic validation failure.
+429
+Rate limit exceeded.
+500
+Unexpected server error; safe response with request ID.
+503
+Temporary service unavailability.
+11. Result Approval and Publication State Machines
+11.1 State machine
+DRAFT --teacher submits--> SUBMITTED
+SUBMITTED --review begins--> UNDER_REVIEW
+UNDER_REVIEW --reviewer returns--> DRAFT (reason required)
+UNDER_REVIEW --reviewer approves--> APPROVED
+APPROVED --publisher publishes--> PUBLISHED
+PUBLISHED --authorized correction requested--> CORRECTION_PENDING
+CORRECTION_PENDING --approver rejects--> PUBLISHED (original value retained)
+CORRECTION_PENDING --approver approves--> PUBLISHED (new version + audit history)
+DRAFT/SUBMITTED --authorized cancel--> CANCELLED (reason and audit required)
+11.2 Transition rules
+Transition
+Actor permission
+Preconditions
+Side effects
+DRAFT -> SUBMITTED
+result.submit
+Assessment open; all required roster rows accounted for; valid values
+Freeze submitted version; audit event; notify reviewer.
+SUBMITTED -> UNDER_REVIEW
+result.review
+Submission exists; reviewer scope valid
+Record reviewer and start time.
+UNDER_REVIEW -> DRAFT
+result.return
+Reason required
+Return to assigned teacher; preserve submitted snapshot.
+UNDER_REVIEW -> APPROVED
+result.approve
+Validation passed; reviewer authorized; conflict policy satisfied
+Record approver, approved version, audit.
+APPROVED -> PUBLISHED
+result.publish
+All required approvals complete; confirmation; current version matches
+Atomic state transition; publication event; enqueue notifications via outbox.
+PUBLISHED -> CORRECTION_PENDING
+result.correction.request
+Reason and proposed value/status provided
+Store immutable correction request; original remains visible.
+CORRECTION_PENDING -> PUBLISHED
+result.correction.approve
+Approver differs from requester; valid range; current version unchanged or conflict resolved
+Apply new version; preserve old/new values; notify authorized parties.
+CORRECTION_PENDING -> PUBLISHED (reject)
+result.correction.approve
+Decision note provided
+No score change; preserve rejection record.
+Any cancellable pre-publish state -> CANCELLED
+assessment.cancel
+Authorized; reason required; no prohibited dependencies
+Retain record for audit; prevent further mutation.
+Enforce transitions in a domain service with transactional updates and a database-level version/locking strategy. Direct PATCH of workflow_status is prohibited. Publication should be idempotent and use a transactional outbox to avoid a published result without a corresponding notification job/audit event.
+12. Audit-Event and Security-Event Schemas
+12.1 Audit event JSON schema (logical)
+{
+  "eventId": "uuid",
+  "occurredAt": "RFC3339 UTC timestamp",
+  "schoolId": "uuid|null",
+  "actor": {
+    "userId": "uuid|null",
+    "roleSnapshot": ["teacher"],
+    "authenticationStrength": "password+mfa"
+  },
+  "action": "result.publish",
+  "resource": {"type":"assessment","id":"uuid"},
+  "outcome": "success|denied|failure",
+  "reasonCode": "optional-stable-code",
+  "correlationId": "uuid",
+  "source": {"ip":"optional","userAgent":"optional"},
+  "change": {
+    "before": {"status":"approved","version":3},
+    "after": {"status":"published","version":4}
+  },
+  "detailsRedacted": {}
+}
+12.2 Security event JSON schema (logical)
+{
+  "eventId": "uuid",
+  "occurredAt": "RFC3339 UTC timestamp",
+  "schoolId": "uuid|null",
+  "actorUserId": "uuid|null",
+  "eventType": "AUTH_FAILURE_BURST",
+  "severity": "info|low|medium|high|critical",
+  "sourceIp": "optional",
+  "target": {"type":"user|student|assessment|api","id":"optional"},
+  "correlationId": "uuid",
+  "signals": {"count": 8, "windowSeconds": 300},
+  "detailsRedacted": {},
+  "alertStatus": "new|triaged|contained|closed|false_positive"
+}
+12.3 Event taxonomy
+Category
+Example event codes
+Authentication
+AUTH_LOGIN_SUCCESS, AUTH_LOGIN_FAILURE, AUTH_LOCKOUT, AUTH_MFA_FAILURE, AUTH_PASSWORD_RESET_REQUEST, AUTH_PASSWORD_RESET_COMPLETE
+Authorization
+AUTHZ_DENY_OBJECT_SCOPE, AUTHZ_DENY_FUNCTION, AUTHZ_ROLE_CHANGE, AUTHZ_ASSIGNMENT_REVOKED
+Academic integrity
+RESULT_SCORE_CREATED, RESULT_SUBMITTED, RESULT_APPROVED, RESULT_PUBLISHED, RESULT_CORRECTION_REQUESTED, RESULT_CORRECTION_APPLIED
+Data access
+SENSITIVE_EXPORT_REQUESTED, SENSITIVE_EXPORT_DOWNLOADED, STUDENT_RECORD_BULK_READ
+System
+DB_FAILOVER, BACKUP_FAILED, RESTORE_DRILL_FAILED, QUEUE_BACKLOG_HIGH, DEPLOYMENT_ROLLBACK
+Account lifecycle
+ACCOUNT_INVITED, ACCOUNT_ACTIVATED, ACCOUNT_SUSPENDED, SESSION_REVOKED
+Audit events are for accountability; security events are signals for detection and response. They may share a correlation ID but should have different access controls and retention. Never log passwords, recovery tokens, session cookies, MFA secrets, or full payment credentials.
+13. Security Alert Rules and Incident Response
+13.1 Initial alert rules
+ID
+Signal
+Initial threshold
+Severity
+Action
+AL-01
+Privileged login failures
+>=5 failures for one privileged account in 10 minutes
+High
+Rate-limit, notify security/admin contact, investigate source.
+AL-02
+Distributed account probing
+>=20 failed attempts across >=10 accounts from one source in 5 minutes
+High
+Rate-limit source, review WAF/identity telemetry.
+AL-03
+Cross-student access attempts
+>=5 distinct denied student-record IDs by one actor in 5 minutes
+High
+Block/risk-score session, inspect audit trail.
+AL-04
+Repeated teacher scope violation
+>=5 denied unassigned-class requests in 10 minutes
+Medium/High
+Alert school admin; review possible misuse or UI defect.
+AL-05
+Unexpected role/permission grant
+Any grant of high/critical permission
+High
+Notify security/admin; require audit and step-up; verify grantor.
+AL-06
+Published result mutation attempt
+Any direct update attempt outside correction workflow
+High
+Deny, audit, alert if repeated or privileged.
+AL-07
+Bulk export anomaly
+Export above configured row threshold or outside expected role/time pattern
+High
+Hold export for review when policy requires; audit download.
+AL-08
+Suspended account activity
+Any protected API attempt after suspension
+High
+Invalidate sessions; investigate stale token/session.
+AL-09
+Audit pipeline failure
+Audit event persistence unavailable for critical action
+Critical
+Fail closed for critical mutations; page on-call.
+AL-10
+Backup failure
+Scheduled backup missed or integrity verification failed
+High
+Retry, alert operations, verify latest valid restore point.
+AL-11
+Notification queue backlog
+Queue age exceeds configured SLO for 10 minutes
+Medium
+Scale/retry workers; inspect provider errors.
+AL-12
+Possible tenant isolation defect
+Any cross-school data reference returned or detected
+Critical
+Block affected operation, incident response, preserve evidence.
+13.2 Incident-response lifecycle
+1. Detect: monitoring creates an incident with timestamp, correlation IDs, affected service, and severity.
+2. Triage: on-call confirms scope, impact, affected school/users/data, and whether the signal is genuine.
+3. Contain: revoke sessions, disable affected accounts, pause exports/publication, isolate compromised component, or apply rate limits as appropriate.
+4. Preserve evidence: retain relevant logs, deployment hashes, access events, and time window; restrict evidence access.
+5. Eradicate: remove root cause, rotate exposed secrets, patch code/configuration, and close exploited access paths.
+6. Recover: restore service/data from validated sources; verify academic record integrity and authorization tests.
+7. Notify: follow the approved legal, regulatory, contractual, and school communication plan; do not improvise breach notices.
+8. Review: document root cause, timeline, impact, corrective actions, owner, due date, and regression tests.
+13.3 Severity guide
+Severity
+Definition
+Response target (proposed)
+Critical
+Confirmed or credible cross-school disclosure, privileged compromise, integrity compromise, or loss of critical audit capability
+Immediate page/on-call; contain as soon as safely possible.
+High
+Likely unauthorized access, result tampering attempt, privileged abuse, or major service degradation
+Prompt on-call investigation; same-hour triage target.
+Medium
+Repeated suspicious activity or degraded non-critical capability
+Business-hours triage or within agreed support SLA.
+Low/Info
+Expected security event or low-risk anomaly
+Aggregate, trend, and review.
+Response targets are operational proposals and must be staffed, tested, and approved. Alert rules need tuning against real baseline data to avoid excessive false positives.
+14. Detailed Threat and Edge-Case Matrices
+14.1 Threat model (STRIDE-oriented)
+ID
+Threat class
+Scenario
+Asset
+Mitigations
+Verification
+T-01
+Spoofing
+Credential theft / account takeover
+All accounts; especially Head Teacher
+MFA, rate limits, secure recovery, session revocation, anomaly alerts
+Auth tests; tabletop account takeover drill
+T-02
+Tampering
+Student edits score via direct API
+Results
+Server-side permissions, workflow transitions, immutable audit, version checks
+Negative API test for each student mutation endpoint
+T-03
+Repudiation
+Staff denies changing result
+Academic records
+Append-only audit, actor identity, correlation IDs, time synchronization
+Audit completeness test
+T-04
+Information disclosure
+Parent reads unrelated child's record
+Student/parent portals
+Verified relationship ABAC; object-level checks; safe errors
+IDOR tests across IDs and endpoints
+T-05
+Information disclosure
+Cross-school data leak
+Multi-tenant data
+school_id scoping, composite FKs, tenant tests, optional RLS
+Automated cross-tenant test suite
+T-06
+Denial of service
+Login or report endpoint abused
+Availability
+Rate limits, quotas, async reports, WAF, queue limits
+Load and abuse tests
+T-07
+Elevation of privilege
+Teacher assigns self Head Teacher role
+IAM
+Grantable-permission policy; no self-grant; MFA; audit
+Role escalation tests
+T-08
+Tampering
+Concurrent teacher updates overwrite score
+Results
+Optimistic locking, transaction, stale-version 409
+Concurrency test
+T-09
+Disclosure
+Export link reused or shared
+Reports/documents
+Re-authorize at download, short-lived signed URL, ownership check
+Expired/revoked export tests
+T-10
+Tampering
+Malicious uploaded file
+Documents/imports
+Allowlist types, size limit, malware scan, storage outside web root, safe parser
+Malware test fixture and parser fuzzing
+T-11
+Repudiation
+Audit log altered by app role
+Audit
+Separate DB role, append-only grants, external immutable sink
+Privilege and integrity test
+T-12
+Availability
+Backup corrupted or not restorable
+Operations
+Multiple backup layers, integrity checks, restore drills
+Quarterly restore exercise
+T-13
+Spoofing
+Forged parent-child link
+Parent portal
+Proof/approval process, audit, link revocation
+Unverified link access tests
+T-14
+Tampering
+Direct state patch publishes result
+Results API
+Only transition commands; state machine enforcement
+Fuzz status fields / forbidden PATCH tests
+T-15
+Disclosure
+PII leaked to logs/analytics
+All services
+Redaction, schema allowlist, secret scanning, limited retention
+Automated log redaction tests
+14.2 Edge-case test matrix
+ID
+Condition
+Expected behavior
+Area
+EC-01
+Unauthenticated request to protected route
+401/redirect; no record data; correlation ID
+API/UI
+EC-02
+Expired/revoked session
+Reject immediately; require re-authentication
+Auth
+EC-03
+Must-change-password user calls normal API
+403/PASSWORD_CHANGE_REQUIRED; no side effect
+Auth
+EC-04
+Student changes URL/API ID
+Deny or concealed 404; no disclosure
+Authorization
+EC-05
+Parent link pending/revoked/expired
+No linked-child access
+ABAC
+EC-06
+Teacher assignment expired/revoked
+No further class/subject mutation
+ABAC
+EC-07
+Score exceeds max or is negative
+422 validation; no partial write
+Results
+EC-08
+Score 0 vs absent vs missing vs exempt
+Preserve distinct semantic status
+Results
+EC-09
+Duplicate bulk request after timeout
+Idempotent result; no duplicate effect
+Reliability
+EC-10
+Concurrent stale score update
+409 conflict; no silent overwrite
+Concurrency
+EC-11
+Publish with incomplete roster
+Block unless explicit policy exception approved
+Workflow
+EC-12
+Correction requester attempts self-approval
+403/409; unchanged score
+Workflow
+EC-13
+Parent has two children
+Child switcher scoped; no sibling confusion or unrelated access
+UI/ABAC
+EC-14
+Account suspended while session active
+Session invalidated; next request denied
+IAM
+EC-15
+Notification provider unavailable
+Queue retry with backoff; no duplicate sensitive sends
+Notifications
+EC-16
+Export role revoked while job running
+Cancel or re-authorize before generating/delivering
+Reports
+EC-17
+Malformed import or duplicate student number
+Validation report; explicit commit; no silent partial import
+Import
+EC-18
+Database unavailable during publish
+Transaction rollback; no partial publication
+Reliability
+EC-19
+Audit write fails during critical action
+Fail closed or durable outbox; no untraceable critical mutation
+Audit
+EC-20
+Timezone/date boundary
+School-local academic date interpreted consistently
+Date handling
+EC-21
+Student transfer between sessions/classes
+Effective dates and history retained; current scope updated
+Enrollment
+EC-22
+Historical teacher assignment queried
+Access follows defined historical policy, not current assignment accidentally
+ABAC
+EC-23
+Browser back/cache after logout
+Protected response not exposed; cache headers appropriate
+Session/privacy
+EC-24
+Bulk endpoint mixes authorized and unauthorized student IDs
+Default all-or-nothing; no unauthorized row mutation or existence leakage
+Bulk auth
+EC-25
+Queue redelivery / duplicate webhook
+Idempotent consumer and unique event key
+Async
+EC-26
+Clock skew across app servers
+NTP/time sync; UTC timestamps; bounded token validity behavior
+Operations
+EC-27
+Backup restore to new environment
+Secrets re-provisioned securely; restore integrity verified
+DR
+EC-28
+School archived while background job queued
+Job re-checks school/account status before processing
+Jobs
+EC-29
+User email/phone changes during reset flow
+Invalidate or bind token to current account state per policy
+Recovery
+EC-30
+Unknown/unhandled exception
+Safe 500 response; no stack/PII; alert with request ID
+Reliability
+15. Developer-Ready User Stories and Acceptance Criteria
+Story
+User story
+Acceptance criteria (minimum)
+Priority
+US-IAM-01
+As a user, I want to log in securely so that I can access my permitted school workspace.
+Given valid active credentials, when I log in, then a secure session is created and my role-limited dashboard is returned. Invalid credentials return a generic error; rate limits apply; no password or token is logged.
+P0
+US-IAM-02
+As a first-time user, I must replace temporary credentials before using the system.
+Given must_change_password=true, when I authenticate, then only restricted authentication/password endpoints work until a compliant password is saved; direct API calls to normal endpoints are denied.
+P0
+US-IAM-03
+As a user, I want account recovery without exposing my account existence.
+Known and unknown identifiers receive the same public response; token is random, hashed at rest, single-use, expires, and session revocation follows policy.
+P0
+US-IAM-04
+As a Head Teacher, I want to grant roles without allowing self-escalation.
+Only grantable roles/permissions can be assigned; unauthorized grants are denied and audited; high-risk grants require step-up/MFA.
+P0
+US-ACL-01
+As a student, I want to view my published results privately.
+Student can read only their own published results; attempts to use another ID in URL, query, export, or API are denied and tested.
+P0
+US-ACL-02
+As a parent, I want to view my linked child's records.
+Only active verified links grant access; pending/revoked links deny access; access stops after revocation without waiting for cache expiry beyond defined propagation SLO.
+P0
+US-ACL-03
+As a teacher, I want to work only on assigned classes and subjects.
+Effective assignment and school scope are checked server-side for list, detail, bulk, export, and background-job operations.
+P0
+US-RES-01
+As a teacher, I want to enter and submit scores for review.
+Scores are range-checked; roster enrolment is verified; draft writes use version checks; submission freezes the submitted version and records an audit event.
+P0
+US-RES-02
+As an authorized reviewer, I want to approve or return results.
+Only valid state transitions are allowed; returns require a reason; reviewer identity and timestamp are stored; direct status patch is rejected.
+P0
+US-RES-03
+As an authorized publisher, I want to publish approved results safely.
+Publication requires permission and required step-up; transaction checks completeness and approved version; repeat idempotency key does not duplicate notifications or versions.
+P0
+US-RES-04
+As an authorized user, I want to correct a published score transparently.
+Correction requires reason; requester cannot approve; old/new values are preserved; decision is audited; original history remains accessible to authorized reviewers.
+P0
+US-ATT-01
+As an assigned teacher, I want to record attendance for my class.
+Only enrolled students are listed; duplicate student/date/class/session records are prevented; finalized records require correction workflow.
+P1
+US-ADM-01
+As a Head Teacher, I want to create students and enrol them in sessions/classes.
+Identifiers are unique in school scope; foreign-key and school-boundary validation prevents cross-school links; changes are audited.
+P0
+US-REP-01
+As an authorized user, I want to export permitted reports.
+Filters and row-level access are enforced server-side; download is re-authorized; signed link expires; export is audited; revoked permission prevents delivery.
+P1
+US-AUD-01
+As an authorized auditor, I want to review important actions.
+Audit records include actor, action, resource, outcome, timestamp, correlation ID; secrets are redacted; application roles cannot edit/delete history.
+P0
+US-OPS-01
+As an operator, I want to restore the system after failure.
+A documented restore exercise meets approved RPO/RTO; integrity checks and post-restore authorization tests pass before traffic is restored.
+P0
+US-NOT-01
+As a user, I want timely notices without exposing private information.
+Outbox/queue retries safely; duplicate delivery is controlled; content is audience-scoped; provider failures are visible and do not roll back committed academic data.
+P1
+US-IMP-01
+As an authorized administrator, I want to import student data safely.
+Upload is scanned and validated; preview lists row errors; commit is explicit and idempotent; rejected rows cannot be silently accepted.
+P1
+16. Deployment Architecture and CI/CD
+16.1 Production topology
+Internet
+  -> DNS + TLS + WAF/rate limiting
+  -> Load balancer / reverse proxy
+  -> Web frontend (static/CDN or app server)
+  -> API application instances (private network; horizontally scalable)
+       -> PostgreSQL managed primary + standby / PITR
+       -> private object storage (documents/exports)
+       -> queue + background workers (notifications/reports/imports)
+       -> optional Redis (cache/rate limits; never sole source of truth)
+       -> centralized logs, metrics, traces, security events
+  -> backup account/project with restricted write/delete privileges
+16.2 Environment separation
+Separate development, test, staging, and production accounts/projects, credentials, databases, and encryption keys.
+No real student PII in developer laptops or test fixtures; use synthetic/masked data.
+Production access is least privilege, MFA-protected, time-bounded, and audited.
+Secrets are held in a managed secret store; never commit them to source control or bake them into images.
+Private database and object storage; only necessary ingress exposed publicly.
+Infrastructure is defined as code and reviewed like application code.
+16.3 CI/CD pipeline gates
+1. Pull request: formatting, linting, type checks, unit tests.
+2. Dependency and license scan; secret scan; static application security testing.
+3. Build immutable artifacts and generate software bill of materials (SBOM).
+4. Database migration validation against an ephemeral database; backward-compatibility checks.
+5. Integration tests, API contract tests, authorization-negative tests, and tenant-isolation tests.
+6. Container/image scan and infrastructure-as-code policy scan.
+7. Deploy to staging; smoke, end-to-end, accessibility, and performance regression tests.
+8. Approval gate for production; canary/rolling deployment; health checks.
+9. Post-deploy synthetic checks and automated rollback trigger if SLO/error thresholds are breached.
+10. Record release ID, source commit, artifact digest, migration version, approver, and outcome.
+16.4 Deployment safety
+Use expand-and-contract database migrations: add compatible columns/tables, deploy compatible code, backfill, switch reads/writes, then remove old structures in a later release. Never rely on a destructive migration that cannot be rolled back safely. For score publication and schema changes, define explicit rollback and data-reconciliation procedures.
+17. Monitoring, Backups, and Disaster Recovery
+17.1 Observability
+Signal
+Examples
+Alert/use
+Availability/latency
+Uptime checks, API P50/P95/P99, error rate
+SLO burn alerts; endpoint-specific diagnosis.
+Application
+Unhandled exceptions, request IDs, saturation
+Debug with redacted structured logs.
+Database
+Connections, slow queries, locks, replication lag, storage
+Capacity and integrity risk.
+Queue
+Queue age, retries, dead-letter count, delivery failures
+Scale workers and investigate provider outages.
+Security
+Login failures, access denials, role changes, export anomalies
+SOC/security alert workflow.
+Audit pipeline
+Write failures, queue lag, sink integrity checks
+Critical actions fail closed or durable outbox.
+Backups
+Last successful backup, restore point age, checksum/restore verification
+Page operations on missed RPO or failed restore.
+Product
+Result publication duration, attendance completion, report generation
+Operational service quality.
+17.2 Logging rules
+Structured logs use request/correlation ID, service, environment, operation, duration, and safe outcome code.
+Never log passwords, cookies, bearer tokens, reset links, MFA secrets, private keys, or unredacted sensitive student data.
+Restrict log access by job responsibility; define retention and deletion policy.
+Synchronize clocks; use UTC in logs and events.
+Use separate security event pipeline and immutable/append-only retention for critical audit data.
+17.3 Backup policy (initial recommendation)
+Data
+Strategy
+Initial schedule / control
+PostgreSQL
+Managed point-in-time recovery plus encrypted snapshots
+Continuous WAL/PITR where supported; daily snapshots; retain per approved schedule.
+Object storage
+Versioning, encryption, lifecycle rules, cross-account or isolated backup copy
+Daily inventory/integrity checks; protect against accidental deletion/ransomware.
+Configuration/IaC
+Version control + protected release tags
+Every change; signed/reviewed production release.
+Secrets/keys
+Provider-managed backup/recovery and rotation plan
+Never export secrets in ordinary database backups.
+Audit/security logs
+Restricted append-only or immutable sink
+Retention based on approved policy and legal obligations.
+Backups are not proven until restored. Run automated integrity checks and scheduled restoration drills. At minimum, perform quarterly full restore exercises and after material infrastructure changes.
+17.4 Disaster recovery runbook
+Declare incident and appoint incident commander; determine data-loss window and affected school(s).
+Freeze high-risk operations if integrity is uncertain (e.g., result publication, bulk imports, finance if enabled).
+Provision clean infrastructure from reviewed IaC; rotate credentials if compromise is suspected.
+Restore database to selected recovery point; restore/version object storage and verify checksums.
+Run schema/version compatibility and referential-integrity checks.
+Run smoke tests, authorization regression tests, and targeted reconciliation of recent scores/publications.
+Validate queues/outbox so stale jobs do not resend or mutate records incorrectly.
+Obtain authorized go/no-go approval; restore traffic gradually and monitor.
+Record actual RPO/RTO, data gaps, recovery actions, and follow-up controls.
+18. Test Strategy
+18.1 Required test layers
+Layer
+Required coverage
+Release gate
+Unit
+Domain rules, grading, state transitions, validation, permission policy helpers
+All critical domain paths covered.
+Integration
+Database constraints, transactions, outbox, queue, storage, identity
+No critical integration failures.
+API contract
+OpenAPI schema, status codes, validation, pagination, error envelope
+Contract tests pass.
+Authorization
+Positive and negative tests for every role/action/resource/scope
+No known authorization bypass; cross-tenant tests pass.
+E2E
+Login, first password change, admission, score entry, review, publish, parent/student read
+Critical workflows pass.
+Security
+SAST, dependency/secret scan, DAST, penetration test, file upload, session, CSRF/XSS where applicable
+No unresolved critical/high finding without formal risk acceptance.
+Performance
+Peak examination login, result publication, report generation, bulk import
+Targets met or remediation approved.
+Resilience
+DB interruption, queue failure, provider outage, retries, backup restore
+No silent corruption; recovery targets demonstrated.
+Accessibility
+Keyboard, screen reader labels, focus, contrast, responsive layouts
+No blocking accessibility defect in core flows.
+UAT
+Head Teacher, teacher, student, parent scenarios
+Product Owner signs off.
+18.2 Mandatory authorization test matrix
+For each endpoint and action:
+  for each role in [HeadTeacher, Teacher, Student, Parent]:
+    test allowed request with valid scope
+    test same request with wrong school_id
+    test resource ID belonging to another student
+    test unassigned class/subject
+    test inactive/expired assignment or guardian link
+    test suspended user and revoked session
+    test missing permission
+    test wrong workflow state
+    assert: no protected data returned and no state change on denial
+Use seeded synthetic schools, users, classes, and students to automate object-level authorization (IDOR/BOLA) testing. Test query filters, exports, background jobs, caches, and downloads—not just detail endpoints.
+19. Requirement-to-Code-and-Test Traceability
+The traceability matrix below connects the principal requirement groups to implementation locations and release evidence. The engineering team should extend it to every ticket and test case and keep it in version control.
+Req ID
+Requirement
+Implementation location
+Verification evidence
+Priority
+FR-IAM-01
+Mandatory authentication
+Auth middleware/session guard
+Auth API + UI tests
+P0
+FR-IAM-02
+First-login password change
+users.must_change_password; auth policy
+API bypass-negative tests
+P0
+FR-IAM-03
+Secure recovery
+password_reset_tokens; recovery service
+Known/unknown, expiry, replay tests
+P0
+FR-IAM-04
+MFA for privileged accounts
+MFA service; privileged action guard
+MFA and step-up tests
+P0
+FR-IAM-05
+Role grant controls
+roles/user_roles/permission service
+Privilege escalation tests
+P0
+FR-SCH-01
+School and academic configuration
+sessions/terms/classes/subjects APIs
+CRUD and date-conflict tests
+P0
+FR-STU-01
+Student profile/enrolment
+students/enrollments
+Uniqueness, transfer, historical tests
+P0
+FR-REL-01
+Verified guardian links
+student_guardians + relationship policy
+Pending/revoked/expired link tests
+P0
+FR-STAFF-01
+Teacher scope
+teacher_assignments + policy engine
+Unassigned/expired assignment tests
+P0
+FR-RES-01
+Score validation
+assessments/scores domain service
+Range, roster, status, max-score tests
+P0
+FR-RES-02
+Separate result actions
+result workflow service
+State-transition matrix tests
+P0
+FR-RES-03
+Correction history
+result_corrections + audit
+Old/new, requester/approver, concurrency tests
+P0
+FR-ATT-01
+Attendance workflow
+attendance APIs and schema
+Duplicate/finalized correction tests
+P1
+FR-PORTAL-01
+Student/parent isolation
+result/attendance query policy
+IDOR/BOLA and relationship tests
+P0
+FR-NOT-01
+Safe reliable notifications
+outbox + queue workers
+Retry, dedupe, recipient-scope tests
+P1
+FR-AUD-01
+Critical audit trail
+audit_events + append-only sink
+Completeness, redaction, integrity tests
+P0
+FR-SEC-01
+Security alerts
+security_events + rules engine
+Rule simulation and escalation drill
+P0
+FR-REP-01
+Scoped reports/exports
+export job + download authorization
+Revoked-role and signed-link tests
+P1
+FR-OPS-01
+Backup and recovery
+backup policies/runbooks/IaC
+Timed restore drill
+P0
+NFR-PERF-01
+Latency targets
+DB indexes, cache, async jobs
+Load test report
+P1
+NFR-SEC-01
+No authorization bypass
+Central policy enforcement
+Negative authorization suite + pen test
+P0
+NFR-REL-01
+Data integrity on failure
+Transactions, idempotency, outbox
+Fault injection/concurrency tests
+P0
+NFR-SCALE-01
+Horizontal scaling
+Stateless API, worker scaling, DB tuning
+Load/soak test
+P1
+NFR-UX-01
+Accessible responsive UI
+Design system and UI components
+Accessibility/UAT report
+P1
+19.1 Traceability workflow
+Every requirement has a stable ID and owner.
+Each implementation ticket references one or more requirement IDs.
+Each automated test references the relevant requirement IDs.
+Changes to authorization or academic integrity requirements trigger security review and regression testing.
+A release cannot be approved while P0 requirements lack passing test evidence or an explicitly documented risk acceptance.
+20. Release Gates and Operational Checklist
+☐ Product Owner approves school scope, academic calendar model, grading policy, parent verification process, and result approval roles.
+☐ RBAC/ABAC matrix is implemented and automated negative tests pass for every protected endpoint.
+☐ Head Teacher account uses MFA and privileged actions are audited.
+☐ First-login password change cannot be bypassed through UI, API, or background routes.
+☐ Recovery tokens are hashed, single-use, expiring, rate-limited, and excluded from logs.
+☐ Student/parent records are isolated; cross-student and cross-school tests pass.
+☐ Score validation, state transitions, correction approval, and concurrency behavior pass.
+☐ Audit log is append-only to ordinary app roles; critical event persistence is tested.
+☐ Security alerts route to a staffed contact and incident response has been rehearsed.
+☐ All P0 threat findings are fixed or formally risk-accepted by an authorized owner.
+☐ Data retention, privacy notice, consent/guardian policies, and regulatory review are completed.
+☐ Backup restore and disaster-recovery drill meet approved RPO/RTO.
+☐ Load test covers peak examination traffic and bulk operations.
+☐ Accessibility, responsive UI, and user acceptance tests are signed off.
+☐ Production secrets, TLS, WAF/rate limits, monitoring, alerting, and least-privilege infrastructure are configured.
+☐ Deployment and rollback procedures are rehearsed; migration plan is backward compatible.
+☐ Support runbooks, escalation contacts, service SLOs, and post-release monitoring ownership are defined.
+Appendix A. Suggested Permission Catalogue
+dashboard.school.read
+profile.self.read
+profile.self.update
+user.create
+user.read
+user.update
+user.suspend
+role.assign
+permission.manage
+student.create
+student.read
+student.update
+student.archive
+student.enroll
+guardian_link.request
+guardian_link.verify
+guardian_link.revoke
+staff.create
+staff.read
+staff.update
+teacher_assignment.manage
+class.manage
+subject.manage
+session.manage
+term.manage
+timetable.manage
+attendance.read
+attendance.create
+attendance.update.draft
+attendance.finalize
+attendance.correct_finalized
+assessment.create
+assessment.read
+score.read.draft
+score.create
+score.update.draft
+result.submit
+result.review
+result.approve
+result.publish
+result.published.read
+result.correction.request
+result.correction.approve
+result.export
+announcement.manage
+announcement.read
+notification.manage
+notification.read.self
+report.school.read
+report.class.read
+report.export
+audit.read
+security_event.read
+document.upload
+document.download
+fee.read
+fee.adjust
+payment.record
+Appendix B. Example OpenAPI schema fragments
+openapi: 3.1.0
+info:
+  title: ESAMS API
+  version: 1.0.0
+servers:
+  - url: /api/v1
+components:
+  schemas:
+    ErrorEnvelope:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, requestId]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            requestId: { type: string, format: uuid }
+            fieldErrors:
+              type: array
+              items:
+                type: object
+                required: [field, code, message]
+                properties:
+                  field: { type: string }
+                  code: { type: string }
+                  message: { type: string }
+    ScoreInput:
+      type: object
+      required: [studentId, scoreStatus]
+      properties:
+        studentId: { type: string, format: uuid }
+        scoreStatus:
+          type: string
+          enum: [scored, absent, missing, exempt]
+        scoreValue:
+          type: [number, 'null']
+          minimum: 0
+        version: { type: integer, minimum: 1 }
+      allOf:
+        - if:
+            properties:
+              scoreStatus: { const: scored }
+          then:
+            required: [scoreValue]
+        - if:
+            properties:
+              scoreStatus: { enum: [absent, missing, exempt] }
+          then:
+            properties:
+              scoreValue: { type: 'null' }
+Appendix C. Definition of Done
+Acceptance criteria pass in CI and staging.
+Authorization positive and negative tests pass, including resource ID substitution and school-scope tests.
+Logs, metrics, audit events, and alerts are added for operationally important behavior.
+Database migrations are reviewed, reversible where practical, and tested on representative data.
+API contracts and UI documentation are updated.
+No secret or sensitive student data is exposed in logs or error responses.
+Feature flags, rollback, and support procedures are documented where relevant.
+Product Owner and QA approve the user story; security review approves high-risk changes.
